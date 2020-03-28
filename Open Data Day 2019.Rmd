@@ -1,0 +1,244 @@
+---
+title: "Open Data Day 2019"
+subtitle: "Looking at Weather Patterns in Cambridge since 1995"
+output: html_notebook
+---
+
+This R Notebook compiles the data analysis my team did as part of the Open Data Day at the University of Cambridge on the 3/3/19. We looked at historical trends of weather in Cambridge over the past ~25 years to allow people to compare today with any day in the record.
+
+This is some simple data analysis to allow us to understand the dataset and check for any interesting trends. 
+
+```{r Package Import, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(cowplot)
+```
+
+```{r Data Import, include=FALSE}
+weather_raw <- read_csv("weather-raw.csv", col_names = FALSE) %>%
+  # This adds in the column names and changes the numerical values
+  mutate(
+    "timestamp" = X1,
+    "temperature" = X2/10,
+    "humidity" = X3,
+    "dewpoint" = X4/10,
+    "pressure" = X5,
+    "mean_wind_speed" = X6/10,
+    "wind_bearing" = X7,
+    "sunshine" = X8/100,
+    "rainfall" = X9/1000,
+    "max_wind_speed" = X10/10
+  ) %>%
+  # Removes original columns
+  select(-contains("X")) %>%
+  # Adds in columns for date and time
+  mutate_at(vars(timestamp), funs(minute, hour, day, week, month, year, as.Date)) %>%
+  rename(date = as.Date)
+
+```
+
+The below graph shows the change in median temperature across the years. Interestingly, we are 
+seeing a decrease in temperature as we go on with time!
+
+```{r Median Temperature over Time}
+weather_raw %>%
+  filter(temperature != -40) %>%
+  group_by(date, day, month, year) %>%
+  summarise(median_temp = median(temperature, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = median_temp)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(colour = "red") +
+  scale_y_continuous(name = "Median Temperature") +
+  scale_x_continuous(name = "Year", breaks = c(1995, 2016)) +
+  facet_grid(cols = vars(month))
+```
+
+We wanted to explore this odd result further by looking at 'extreme weather events'.
+
+We took each of the 52 weeks, and determined which results would count as 'extreme weather events'. We then found how many of these 'extreme events' occured in each month and year, and displayed this below. 
+
+We saw the strongest effect came when only looking at the cold events, which as we can see increase in number towards the current time.
+
+(Note that we have used the raw number of events - the number of samples per day remains constant, so we do not need to take the ratio, which would have potentially accounted for the lower number of extreme events as we go on the record)
+
+```{r}
+weather_raw %>%
+  filter(temperature != -40) %>%
+  group_by(week) %>%
+  summarise(
+    mean = mean(temperature, na.rm = TRUE),
+    low5 = quantile(x = temperature, probs = 0.01),
+    up5 = quantile(x = temperature, probs = 0.99)
+  ) %>%
+  left_join(weather_raw, by = "week") %>%
+  mutate(low = temperature < low5) %>%
+  #filter(temperature < low5 | temperature > up5) %>%
+  count(month, year, low) %>%
+  spread(low, n, fill = 0) %>%
+  mutate(fraction_low = `TRUE`*100/`FALSE`) %>%
+  # ggplot(aes(x = month, y = n, colour = year)) +
+  # geom_point() + 
+  # geom_smooth(aes(colour = year))
+  ggplot(aes(x = as.factor(month), y = as.factor(year), fill = fraction_low)) +
+  geom_bin2d() +
+  scale_fill_continuous(low = "white", high = "black") +
+  #scale_fill_continuous(low = "#440154FF", high = "#FDE725FF") +
+  ggtitle("Percentage of Cold Extreme Events")
+```
+
+```{r}
+weather_raw %>%
+  filter(temperature > -40) %>%
+  group_by(date) %>%
+  summarise(
+    sd = sd(temperature, na.rm = TRUE),
+    n = n()
+  ) %>%
+  ggplot(aes(x = date, y = sd)) +
+  geom_bin2d() +
+  geom_smooth(colour = "red")
+```
+
+
+```{r}
+weather_raw %>%
+  group_by(year, month, day) %>%
+  drop_na(temperature, sunshine) %>%
+  summarise(correlation = cor(temperature, sunshine)) %>%
+  ungroup %>%
+  {mutate(., ID = 1:nrow(.))} %>%
+  ggplot(aes(x = ID, y = correlation)) +
+  geom_hex() +
+  scale_fill_continuous(low = "white", high = "black") +
+  geom_smooth(colour = "red")
+```
+
+```{r}
+lm(temperature ~ hour, data = weather_raw) %>%
+  AIC
+
+lm(temperature ~ hour^2, data = weather_raw) %>%
+  AIC
+
+lm(temperature ~ hour*hour, data = weather_raw) %>%
+  AIC
+
+weather_raw %>%
+  filter(temperature != -40) %>%
+  ggplot(aes(x = month, y = temperature)) + 
+  geom_bin2d() +
+  geom_smooth() +
+  scale_fill_continuous(low = "white", high = "black")
+```
+
+So what detemines the weather? What items are causal and which ones aren't? 
+Causal analysis is an important field of study, and we don't have time to get into it too clearly here - althogh hopefully we can deal with it with some accuracy.
+
+We first want to start graphing relationships between the vairables, and try to build of model which tells us which factors are causing temperature changes. It will be interesting to see if the determinants change over time, indicating changing weather patterns which may explain the paradoxical fall in temperatures here in Cambridge. 
+
+First, let us consider the correlations between the variables:
+
+```{r Correlation}
+weather_raw %>%
+  select(-timestamp, -(minute:date)) %>%
+  drop_na() %>%
+  cor %>%
+  ggcorrplot::ggcorrplot()
+```
+
+
+```{r}
+weather_raw %>%
+  group_by(date) %>%
+  filter(temperature > -40) %>%
+  filter(sunshine > 0 & sunshine < 100) %>%
+  summarise(
+    daily_sunshine = sum(sunshine, na.rm = TRUE),
+    daily_rainfall = sum(rainfall, na.rm = TRUE),
+    temp_90 = quantile(temperature, 0.1, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = log(daily_sunshine), y = daily_rainfall)) +
+  geom_point() +
+  geom_smooth()
+```
+
+Let's switch our attention to daily precipiation. Here we see an interesting spike in average precipitation with our dataset 
+
+```{r}
+
+weather_raw %>%
+  filter(rainfall > 0) %>%
+  group_by(date, day, month, year) %>%
+  summarise(total_daily_rainfall = sum(rainfall, na.rm = TRUE)) %>%
+  ggplot(aes(x = year, y = log10(total_daily_rainfall))) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(colour = "red") +
+  scale_y_continuous(name = "Log Daily Rainfall") +
+  scale_x_continuous(name = "Year", breaks = c(1995, 2016)) +
+  facet_grid(cols = vars(month))
+```
+
+```{r}
+weather_raw %>%
+  filter(temperature > -40) %>%
+  mutate(minutes_in_day = hour * 60 + minute) %>%
+  ggplot(aes(y = temperature, x = week)) +
+  geom_bin2d() +
+  geom_smooth()
+```
+
+```{r Calculating autcorrelation of temperature}
+weather_raw %>%
+  filter(temperature > -40) %>%
+  mutate(
+    temperature_lag = temperature - lag(temperature, 1),
+    time_lag = timestamp - lag(timestamp, 1),
+    acf = (temperature - mean(temperature, na.rm = TRUE))*(lag(temperature, 1) - mean(temperature, na.rm = TRUE))
+    ) %>%
+  ggplot(aes(x = as.numeric(time_lag, "mins"), y = acf)) +
+  geom_bin2d()
+  ggplot(aes(x = temperature_lag / as.numeric(time_lag, "mins"))) +
+  geom_density() +
+  xlim(c(-.1, .1))
+```
+
+```{r}
+weather_raw %>%
+  filter(temperature > -40) %>%
+  mutate(
+    temperature_change = lag(temperature, 48) - temperature,
+    humidity_change = lag(humidity, 48) - humidity
+  ) %>%
+  ggplot(aes(x = temperature_change, y = humidity_change)) +
+  #ggplot(aes(x = temperature, y = humidity)) +
+  geom_bin2d() +
+  geom_smooth(method = "lm")
+```
+
+```{r PCA}
+pca_results <- weather_raw %>%
+  select(-timestamp, -(minute:date)) %>%
+  drop_na() %>%
+  prcomp(center = TRUE, scale = TRUE)
+
+pca_results$x %>%
+  as_tibble() %>%
+  bind_cols(drop_na(weather_raw)) %>%
+  ggplot(aes(x = PC1, y = PC2, colour = temperature)) +
+  geom_point()
+
+pca_results$rotation %>%
+  as_tibble(rownames = 'variable') %>%
+  gather(key = PC, value = rotation, -variable) %>%
+  ggplot(aes(x = PC, y = variable, fill = abs(rotation))) +
+  geom_bin2d() +
+  scale_fill_continuous(low = "white", high = "black")
+```
+
+```{r}
+weather_raw %>%
+  ggplot(aes(x = wind_bearing, y = temperature)) +
+  geom_bin2d() +
+  geom_smooth()
+```
+
